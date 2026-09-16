@@ -8,17 +8,13 @@
     "packages/*"
   ],
   "scripts": {
-    "build:types": "pnpm --filter @mesh/shared-types build",
+    "build:types": "npm run build --workspace=@mesh/shared-types",
     "typecheck": "tsc --noEmit --project tsconfig.base.json"
   },
   "devDependencies": {
     "typescript": "^5.4.5"
   },
   "engines": {
-    "node": ">=20.0.0",
-    "pnpm": ">=8.0.0"
-  },
-  "dependencies": {
-    "next": "^16.3.5"
+    "node": ">=20.0.0"
   }
 }
