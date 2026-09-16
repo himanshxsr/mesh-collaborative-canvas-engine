@@ -1,0 +1,23 @@
+# Dependencies
+node_modules/
+
+# Build Outputs & Cache
+dist/
+build/
+.next/
+out/
+*.tsbuildinfo
+
+# Environment Variables
+.env
+.env*.local
+!.env.example
+
+# Logs
+npm-debug.log*
+
+# Editor & OS Files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
