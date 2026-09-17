@@ -84,6 +84,7 @@ export function InfiniteCanvas({
 
   const [isDrawing, setIsDrawing] = useState(false);
   const [currentPathPoints, setCurrentPathPoints] = useState<Array<[number, number]>>([]);
+  const [connectorSourceId, setConnectorSourceId] = useState<string | null>(null);
 
   const [marqueeStart, setMarqueeStart] = useState<WorldPoint | null>(null);
   const [marqueeCurrent, setMarqueeCurrent] = useState<WorldPoint | null>(null);
@@ -361,6 +362,54 @@ export function InfiniteCanvas({
       onSelectTool('select');
       onSetSelectedElementIds([newSticky.id]);
       onUpdateSelection([newSticky.id]);
+      return;
+    }
+
+    // Connector Tool
+    if (activeTool === 'connector') {
+      let clickedElementId: string | null = null;
+      elements.forEach((el) => {
+        if (
+          worldPt.wx >= el.x &&
+          worldPt.wx <= el.x + el.width &&
+          worldPt.wy >= el.y &&
+          worldPt.wy <= el.y + el.height
+        ) {
+          clickedElementId = el.id;
+        }
+      });
+
+      if (clickedElementId) {
+        if (!connectorSourceId) {
+          setConnectorSourceId(clickedElementId);
+        } else if (connectorSourceId !== clickedElementId) {
+          const newConnector: ConnectorElement = {
+            id: crypto.randomUUID(),
+            type: 'connector',
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+            rotation: 0,
+            strokeColor: defaultInkColor,
+            fillColor: 'transparent',
+            strokeWidth: 2,
+            zIndex: Date.now(),
+            updatedAt: Date.now(),
+            updatedBy: userId,
+            isDeleted: false,
+            sourceId: connectorSourceId,
+            sourceAnchor: 'bottom',
+            targetId: clickedElementId,
+            targetAnchor: 'top'
+          };
+          onAddOrUpdateElement(newConnector);
+          setConnectorSourceId(null);
+          onSelectTool('select');
+        }
+      } else {
+        setConnectorSourceId(null);
+      }
       return;
     }
 
