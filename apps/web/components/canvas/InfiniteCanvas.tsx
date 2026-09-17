@@ -8,6 +8,9 @@ import type {
   StickyElement,
   CardElement,
   ConnectorElement,
+  TextElement,
+  EllipseElement,
+  DiamondElement,
   WorldPoint,
   AwarenessPayload
 } from '@mesh/shared-types';
@@ -19,6 +22,7 @@ import { sanitizeText } from '@/lib/security/sanitize';
 interface InfiniteCanvasProps {
   elements: Map<string, CanvasElement>;
   activeTool: ToolType;
+  onSelectTool: (tool: ToolType) => void;
   onAddOrUpdateElement: (element: CanvasElement) => void;
   onDeleteElement: (id: string) => void;
   remotePresences: Map<string, AwarenessPayload>;
@@ -28,6 +32,13 @@ interface InfiniteCanvasProps {
   isDarkMode?: boolean;
   onUpdateSelection: (ids: string[]) => void;
   onUpdateChatMessage: (msg: string | undefined) => void;
+  selectedElementIds: string[];
+  onSetSelectedElementIds: (ids: string[]) => void;
+  onUndo: () => void;
+  onRedo: () => void;
+  strokeColor: string;
+  strokeWidth: number;
+  fillColor: string;
 }
 
 function getOrganicRotationDeg(id: string): number {
@@ -49,13 +60,22 @@ function isEditableElement(target: EventTarget | null): boolean {
 export function InfiniteCanvas({
   elements,
   activeTool,
+  onSelectTool,
   onAddOrUpdateElement,
+  onDeleteElement,
   remotePresences,
   onRegisterPointer,
   userId,
   isDarkMode = true,
   onUpdateSelection,
-  onUpdateChatMessage
+  onUpdateChatMessage,
+  selectedElementIds,
+  onSetSelectedElementIds,
+  onUndo,
+  onRedo,
+  strokeColor,
+  strokeWidth,
+  fillColor
 }: InfiniteCanvasProps) {
   const [camera, setCamera] = useState<CameraState>({ x: 0, y: 0, zoom: 1.0 });
   const [isSpacePressed, setIsSpacePressed] = useState(false);
@@ -65,7 +85,6 @@ export function InfiniteCanvas({
   const [isDrawing, setIsDrawing] = useState(false);
   const [currentPathPoints, setCurrentPathPoints] = useState<Array<[number, number]>>([]);
 
-  const [selectedElementIds, setSelectedElementIds] = useState<string[]>([]);
   const [marqueeStart, setMarqueeStart] = useState<WorldPoint | null>(null);
   const [marqueeCurrent, setMarqueeCurrent] = useState<WorldPoint | null>(null);
 
@@ -74,33 +93,91 @@ export function InfiniteCanvas({
   const [chatInputValue, setChatInputValue] = useState('');
   const chatFadeTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
+  const [editingElementId, setEditingElementId] = useState<string | null>(null);
+  const [editingTextValue, setEditingTextValue] = useState('');
+
   const containerRef = useRef<HTMLDivElement>(null);
   const chatInputRef = useRef<HTMLInputElement>(null);
+  const textEditingRef = useRef<HTMLTextAreaElement>(null);
 
-  const defaultInkColor = isDarkMode ? '#f1f5f9' : '#0f172a';
+  const defaultInkColor = strokeColor === '#0f172a' && isDarkMode ? '#f1f5f9' : strokeColor;
+  const actualFillColor = fillColor === 'tint' ? defaultInkColor + '33' : 'transparent';
 
+  // Global Keyboard Shortcuts Routing
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.code === 'Space' && !isEditableElement(e.target)) {
-        e.preventDefault();
-        setIsSpacePressed(true);
+      if (isEditableElement(e.target) || editingElementId !== null) {
+        return;
       }
 
-      if (e.key === '/' && !isEditableElement(e.target) && !isChatOpen) {
+      // Space Panning
+      if (e.code === 'Space') {
+        e.preventDefault();
+        setIsSpacePressed(true);
+        return;
+      }
+
+      // Undo / Redo
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+        e.preventDefault();
+        if (e.shiftKey) {
+          onRedo();
+        } else {
+          onUndo();
+        }
+        return;
+      }
+
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
+        e.preventDefault();
+        onRedo();
+        return;
+      }
+
+      // Delete / Backspace
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        if (selectedElementIds.length > 0) {
+          e.preventDefault();
+          selectedElementIds.forEach((id) => onDeleteElement(id));
+          onSetSelectedElementIds([]);
+          onUpdateSelection([]);
+        }
+        return;
+      }
+
+      // Cursor Chat '/'
+      if (e.key === '/' && !isChatOpen) {
         e.preventDefault();
         setIsChatOpen(true);
         setChatInputValue('');
         setTimeout(() => chatInputRef.current?.focus(), 50);
+        return;
       }
 
+      // Escape
       if (e.key === 'Escape') {
         if (isChatOpen) {
           setIsChatOpen(false);
           onUpdateChatMessage(undefined);
         }
-        setSelectedElementIds([]);
+        onSetSelectedElementIds([]);
         onUpdateSelection([]);
+        setEditingElementId(null);
+        return;
       }
+
+      // Tool Shortcuts
+      const key = e.key.toLowerCase();
+      if (key === 'v') onSelectTool('select');
+      else if (key === 'h') onSelectTool('hand');
+      else if (key === 'p') onSelectTool('pen');
+      else if (key === 't') onSelectTool('text');
+      else if (key === 's') onSelectTool('sticky');
+      else if (key === 'c') onSelectTool('card');
+      else if (key === 'o') onSelectTool('ellipse');
+      else if (key === 'd') onSelectTool('diamond');
+      else if (key === 'e') onSelectTool('eraser');
+      else if (key === 'l') onSelectTool('connector');
     };
 
     const handleKeyUp = (e: KeyboardEvent) => {
@@ -116,7 +193,18 @@ export function InfiniteCanvas({
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
     };
-  }, [isChatOpen, onUpdateChatMessage, onUpdateSelection]);
+  }, [
+    isChatOpen,
+    editingElementId,
+    selectedElementIds,
+    onSelectTool,
+    onDeleteElement,
+    onSetSelectedElementIds,
+    onUpdateSelection,
+    onUpdateChatMessage,
+    onUndo,
+    onRedo
+  ]);
 
   const handleWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
     e.preventDefault();
@@ -150,12 +238,106 @@ export function InfiniteCanvas({
     };
     const worldPt = screenToWorld(screenPt, camera);
 
+    // Eraser Tool
+    if (activeTool === 'eraser') {
+      elements.forEach((el) => {
+        if (
+          worldPt.wx >= el.x &&
+          worldPt.wx <= el.x + el.width &&
+          worldPt.wy >= el.y &&
+          worldPt.wy <= el.y + el.height
+        ) {
+          onDeleteElement(el.id);
+        }
+      });
+      return;
+    }
+
+    // Pen Tool
     if (activeTool === 'pen') {
       setIsDrawing(true);
       setCurrentPathPoints([[worldPt.wx, worldPt.wy]]);
       return;
     }
 
+    // Text Tool
+    if (activeTool === 'text') {
+      const newText: TextElement = {
+        id: crypto.randomUUID(),
+        type: 'text',
+        x: worldPt.wx,
+        y: worldPt.wy,
+        width: 160,
+        height: 40,
+        rotation: 0,
+        strokeColor: defaultInkColor,
+        fillColor: 'transparent',
+        strokeWidth: 1,
+        zIndex: Date.now(),
+        updatedAt: Date.now(),
+        updatedBy: userId,
+        isDeleted: false,
+        text: 'Text element',
+        fontSize: 18
+      };
+      onAddOrUpdateElement(newText);
+      setEditingElementId(newText.id);
+      setEditingTextValue(newText.text);
+      onSelectTool('select');
+      return;
+    }
+
+    // Ellipse Tool
+    if (activeTool === 'ellipse') {
+      const newEllipse: EllipseElement = {
+        id: crypto.randomUUID(),
+        type: 'ellipse',
+        x: worldPt.wx - 60,
+        y: worldPt.wy - 60,
+        width: 120,
+        height: 120,
+        rotation: 0,
+        strokeColor: defaultInkColor,
+        fillColor: actualFillColor,
+        strokeWidth,
+        zIndex: Date.now(),
+        updatedAt: Date.now(),
+        updatedBy: userId,
+        isDeleted: false
+      };
+      onAddOrUpdateElement(newEllipse);
+      onSelectTool('select');
+      onSetSelectedElementIds([newEllipse.id]);
+      onUpdateSelection([newEllipse.id]);
+      return;
+    }
+
+    // Diamond Tool
+    if (activeTool === 'diamond') {
+      const newDiamond: DiamondElement = {
+        id: crypto.randomUUID(),
+        type: 'diamond',
+        x: worldPt.wx - 70,
+        y: worldPt.wy - 50,
+        width: 140,
+        height: 100,
+        rotation: 0,
+        strokeColor: defaultInkColor,
+        fillColor: actualFillColor,
+        strokeWidth,
+        zIndex: Date.now(),
+        updatedAt: Date.now(),
+        updatedBy: userId,
+        isDeleted: false
+      };
+      onAddOrUpdateElement(newDiamond);
+      onSelectTool('select');
+      onSetSelectedElementIds([newDiamond.id]);
+      onUpdateSelection([newDiamond.id]);
+      return;
+    }
+
+    // Sticky Note Tool
     if (activeTool === 'sticky') {
       const newSticky: StickyElement = {
         id: crypto.randomUUID(),
@@ -165,7 +347,7 @@ export function InfiniteCanvas({
         width: 160,
         height: 160,
         rotation: (getOrganicRotationDeg(crypto.randomUUID()) * Math.PI) / 180,
-        strokeColor: '#e2e8f0',
+        strokeColor: defaultInkColor,
         fillColor: '#fef08a',
         strokeWidth: 1,
         zIndex: Date.now(),
@@ -176,9 +358,13 @@ export function InfiniteCanvas({
         colorTone: 'amber'
       };
       onAddOrUpdateElement(newSticky);
+      onSelectTool('select');
+      onSetSelectedElementIds([newSticky.id]);
+      onUpdateSelection([newSticky.id]);
       return;
     }
 
+    // Architecture Card Tool
     if (activeTool === 'card') {
       const newCard: CardElement = {
         id: crypto.randomUUID(),
@@ -188,9 +374,9 @@ export function InfiniteCanvas({
         width: 240,
         height: 160,
         rotation: 0,
-        strokeColor: '#cbd5e1',
-        fillColor: '#ffffff',
-        strokeWidth: 1,
+        strokeColor: defaultInkColor,
+        fillColor: isDarkMode ? '#181b24' : '#ffffff',
+        strokeWidth: 1.5,
         zIndex: Date.now(),
         updatedAt: Date.now(),
         updatedBy: userId,
@@ -199,9 +385,13 @@ export function InfiniteCanvas({
         markdownBody: '### System Component\n- Description block\n- Microservice'
       };
       onAddOrUpdateElement(newCard);
+      onSelectTool('select');
+      onSetSelectedElementIds([newCard.id]);
+      onUpdateSelection([newCard.id]);
       return;
     }
 
+    // Select Tool
     if (activeTool === 'select') {
       let clickedElementId: string | null = null;
       elements.forEach((el) => {
@@ -217,12 +407,12 @@ export function InfiniteCanvas({
 
       if (clickedElementId) {
         const nextSelection = [clickedElementId];
-        setSelectedElementIds(nextSelection);
+        onSetSelectedElementIds(nextSelection);
         onUpdateSelection(nextSelection);
       } else {
         setMarqueeStart(worldPt);
         setMarqueeCurrent(worldPt);
-        setSelectedElementIds([]);
+        onSetSelectedElementIds([]);
         onUpdateSelection([]);
       }
     }
@@ -273,7 +463,7 @@ export function InfiniteCanvas({
         }
       });
 
-      setSelectedElementIds(selectedIds);
+      onSetSelectedElementIds(selectedIds);
       onUpdateSelection(selectedIds);
     }
   };
@@ -310,7 +500,7 @@ export function InfiniteCanvas({
         rotation: 0,
         strokeColor: defaultInkColor,
         fillColor: 'transparent',
-        strokeWidth: 3,
+        strokeWidth,
         zIndex: Date.now(),
         updatedAt: Date.now(),
         updatedBy: userId,
@@ -321,6 +511,53 @@ export function InfiniteCanvas({
       onAddOrUpdateElement(newPath);
       setCurrentPathPoints([]);
     }
+  };
+
+  const handleDoubleClickElement = (el: CanvasElement) => {
+    if (el.type === 'text') {
+      const textEl = el as TextElement;
+      setEditingElementId(el.id);
+      setEditingTextValue(textEl.text || '');
+    } else if (el.type === 'sticky') {
+      const stickyEl = el as StickyElement;
+      setEditingElementId(el.id);
+      setEditingTextValue(stickyEl.text || '');
+    } else if (el.type === 'card') {
+      const cardEl = el as CardElement;
+      setEditingElementId(el.id);
+      setEditingTextValue(cardEl.title || '');
+    }
+  };
+
+  const handleSaveEditingText = () => {
+    if (!editingElementId) return;
+    const existing = elements.get(editingElementId);
+    if (!existing) return;
+
+    if (existing.type === 'text') {
+      onAddOrUpdateElement({
+        ...(existing as TextElement),
+        text: editingTextValue.trim() || 'Text element',
+        updatedAt: Date.now(),
+        updatedBy: userId
+      });
+    } else if (existing.type === 'sticky') {
+      onAddOrUpdateElement({
+        ...(existing as StickyElement),
+        text: editingTextValue.trim() || 'Sticky Note',
+        updatedAt: Date.now(),
+        updatedBy: userId
+      });
+    } else if (existing.type === 'card') {
+      onAddOrUpdateElement({
+        ...(existing as CardElement),
+        title: editingTextValue.trim() || 'Architecture Node',
+        updatedAt: Date.now(),
+        updatedBy: userId
+      });
+    }
+
+    setEditingElementId(null);
   };
 
   const handleChatSubmit = (e: React.FormEvent) => {
@@ -355,6 +592,8 @@ export function InfiniteCanvas({
     ? 'cursor-grab'
     : activeTool === 'pen'
     ? 'cursor-crosshair'
+    : activeTool === 'eraser'
+    ? 'cursor-pointer'
     : 'cursor-default';
 
   return (
@@ -378,32 +617,113 @@ export function InfiniteCanvas({
       >
         <svg className="absolute inset-0 w-[50000px] h-[50000px] overflow-visible pointer-events-none">
           {Array.from(elements.values()).map((el) => {
+            const isSelectedLocally = selectedElementIds.includes(el.id);
+            const remoteSelectedPeers = Array.from(remotePresences.values()).filter((p) =>
+              p.selectedElementIds?.includes(el.id)
+            );
+            const firstRemotePeer = remoteSelectedPeers[0];
+
+            const strokeColorResolved =
+              el.strokeColor === '#0f172a' && isDarkMode
+                ? '#f1f5f9'
+                : el.strokeColor === '#f1f5f9' && !isDarkMode
+                ? '#0f172a'
+                : el.strokeColor;
+
+            // Path Renderer
             if (el.type === 'path') {
               const pathEl = el as PathElement;
               const pathD = generateSmoothBezierPath(pathEl.points);
-              const isSelectedLocally = selectedElementIds.includes(el.id);
-
-              const strokeColor =
-                pathEl.strokeColor === '#0f172a' && isDarkMode
-                  ? '#f1f5f9'
-                  : pathEl.strokeColor === '#f1f5f9' && !isDarkMode
-                  ? '#0f172a'
-                  : pathEl.strokeColor;
 
               return (
-                <path
-                  key={el.id}
-                  d={pathD}
-                  stroke={strokeColor}
-                  strokeWidth={pathEl.strokeWidth}
-                  fill="none"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  className={isSelectedLocally ? 'stroke-accent-light dark:stroke-accent-dark stroke-[4px]' : ''}
-                />
+                <g key={el.id}>
+                  <path
+                    d={pathD}
+                    stroke={strokeColorResolved}
+                    strokeWidth={pathEl.strokeWidth}
+                    fill="none"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    className={isSelectedLocally ? 'stroke-accent-light dark:stroke-accent-dark stroke-[4px]' : ''}
+                  />
+                  {firstRemotePeer && (
+                    <path
+                      d={pathD}
+                      stroke={firstRemotePeer.color}
+                      strokeWidth={(pathEl.strokeWidth || 2) + 2}
+                      fill="none"
+                      strokeDasharray="4 4"
+                    />
+                  )}
+                </g>
               );
             }
 
+            // Ellipse Renderer
+            if (el.type === 'ellipse') {
+              const cx = el.x + el.width / 2;
+              const cy = el.y + el.height / 2;
+              const rx = Math.max(1, el.width / 2);
+              const ry = Math.max(1, el.height / 2);
+
+              return (
+                <g key={el.id} className="pointer-events-auto cursor-pointer" onDoubleClick={() => handleDoubleClickElement(el)}>
+                  <ellipse
+                    cx={cx}
+                    cy={cy}
+                    rx={rx}
+                    ry={ry}
+                    fill={el.fillColor || 'transparent'}
+                    stroke={strokeColorResolved}
+                    strokeWidth={el.strokeWidth || 2}
+                    className={isSelectedLocally ? 'stroke-blue-500 stroke-[3px]' : ''}
+                  />
+                  {firstRemotePeer && (
+                    <ellipse
+                      cx={cx}
+                      cy={cy}
+                      rx={rx + 2}
+                      ry={ry + 2}
+                      fill="none"
+                      stroke={firstRemotePeer.color}
+                      strokeWidth={2}
+                      strokeDasharray="4 4"
+                    />
+                  )}
+                </g>
+              );
+            }
+
+            // Diamond Renderer
+            if (el.type === 'diamond') {
+              const top = `${el.x + el.width / 2},${el.y}`;
+              const right = `${el.x + el.width},${el.y + el.height / 2}`;
+              const bottom = `${el.x + el.width / 2},${el.y + el.height}`;
+              const left = `${el.x},${el.y + el.height / 2}`;
+
+              return (
+                <g key={el.id} className="pointer-events-auto cursor-pointer" onDoubleClick={() => handleDoubleClickElement(el)}>
+                  <polygon
+                    points={`${top} ${right} ${bottom} ${left}`}
+                    fill={el.fillColor || 'transparent'}
+                    stroke={strokeColorResolved}
+                    strokeWidth={el.strokeWidth || 2}
+                    className={isSelectedLocally ? 'stroke-blue-500 stroke-[3px]' : ''}
+                  />
+                  {firstRemotePeer && (
+                    <polygon
+                      points={`${top} ${right} ${bottom} ${left}`}
+                      fill="none"
+                      stroke={firstRemotePeer.color}
+                      strokeWidth={2}
+                      strokeDasharray="4 4"
+                    />
+                  )}
+                </g>
+              );
+            }
+
+            // Connector Renderer
             if (el.type === 'connector') {
               const conn = el as ConnectorElement;
               const sourceEl = elements.get(conn.sourceId);
@@ -441,7 +761,7 @@ export function InfiniteCanvas({
             <path
               d={currentPathD}
               stroke={defaultInkColor}
-              strokeWidth={3}
+              strokeWidth={strokeWidth}
               fill="none"
               strokeLinecap="round"
               strokeLinejoin="round"
@@ -463,11 +783,54 @@ export function InfiniteCanvas({
           )}
         </svg>
 
+        {/* HTML Canvas Primitives (Text, Sticky, Card) */}
         {Array.from(elements.values()).map((el) => {
           const remoteSelectedPeers = Array.from(remotePresences.values()).filter((p) =>
             p.selectedElementIds?.includes(el.id)
           );
           const firstRemotePeer = remoteSelectedPeers[0];
+
+          if (el.type === 'text') {
+            const textEl = el as TextElement;
+            const isLocallySelected = selectedElementIds.includes(el.id);
+            const isEditingThis = editingElementId === el.id;
+
+            return (
+              <div
+                key={el.id}
+                onDoubleClick={() => handleDoubleClickElement(el)}
+                className={`absolute p-1 rounded pointer-events-auto transition-all ${
+                  isLocallySelected ? 'ring-2 ring-blue-500' : ''
+                }`}
+                style={{
+                  transform: `translate(${textEl.x}px, ${textEl.y}px)`,
+                  minWidth: `${textEl.width}px`,
+                  color: strokeColor === '#0f172a' && isDarkMode ? '#f1f5f9' : textEl.strokeColor
+                }}
+              >
+                {isEditingThis ? (
+                  <textarea
+                    ref={textEditingRef}
+                    autoFocus
+                    value={editingTextValue}
+                    onChange={(e) => setEditingTextValue(e.target.value)}
+                    onBlur={handleSaveEditingText}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Escape' || (e.key === 'Enter' && !e.shiftKey)) {
+                        e.preventDefault();
+                        handleSaveEditingText();
+                      }
+                    }}
+                    className="bg-transparent border border-blue-500 text-sm font-medium focus:outline-none resize-none w-full h-full text-current"
+                  />
+                ) : (
+                  <p className="font-sans font-medium text-base leading-snug whitespace-pre-wrap">
+                    {sanitizeText(textEl.text)}
+                  </p>
+                )}
+              </div>
+            );
+          }
 
           if (el.type === 'sticky') {
             const sticky = el as StickyElement;
@@ -480,10 +843,12 @@ export function InfiniteCanvas({
             };
             const colorStyle = toneColors[sticky.colorTone] || toneColors.amber;
             const isLocallySelected = selectedElementIds.includes(el.id);
+            const isEditingThis = editingElementId === el.id;
 
             return (
               <div
                 key={el.id}
+                onDoubleClick={() => handleDoubleClickElement(el)}
                 className={`absolute p-4 rounded-lg shadow-md border pointer-events-auto transition-transform ${colorStyle} ${
                   isLocallySelected ? 'ring-2 ring-[#2563eb]' : ''
                 }`}
@@ -503,9 +868,24 @@ export function InfiniteCanvas({
                     {firstRemotePeer.userName}
                   </div>
                 )}
-                <p className="font-sans text-sm leading-snug whitespace-pre-wrap font-medium">
-                  {sanitizeText(sticky.text)}
-                </p>
+                {isEditingThis ? (
+                  <textarea
+                    autoFocus
+                    value={editingTextValue}
+                    onChange={(e) => setEditingTextValue(e.target.value)}
+                    onBlur={handleSaveEditingText}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Escape') {
+                        handleSaveEditingText();
+                      }
+                    }}
+                    className="w-full h-full bg-transparent font-sans text-sm leading-snug font-medium focus:outline-none resize-none"
+                  />
+                ) : (
+                  <p className="font-sans text-sm leading-snug whitespace-pre-wrap font-medium">
+                    {sanitizeText(sticky.text)}
+                  </p>
+                )}
               </div>
             );
           }
@@ -513,10 +893,12 @@ export function InfiniteCanvas({
           if (el.type === 'card') {
             const card = el as CardElement;
             const isLocallySelected = selectedElementIds.includes(el.id);
+            const isEditingThis = editingElementId === el.id;
 
             return (
               <div
                 key={el.id}
+                onDoubleClick={() => handleDoubleClickElement(el)}
                 className={`absolute p-4 rounded-xl shadow-lg border border-[#e2e8f0] dark:border-[#272b37] bg-white dark:bg-[#181b24] text-[#0f172a] dark:text-[#f1f5f9] pointer-events-auto ${
                   isLocallySelected ? 'ring-2 ring-[#2563eb]' : ''
                 }`}
@@ -536,9 +918,25 @@ export function InfiniteCanvas({
                     {firstRemotePeer.userName}
                   </div>
                 )}
-                <h4 className="font-semibold text-base mb-1 border-b pb-1 border-[#e2e8f0] dark:border-[#272b37]">
-                  {sanitizeText(card.title)}
-                </h4>
+                {isEditingThis ? (
+                  <input
+                    type="text"
+                    autoFocus
+                    value={editingTextValue}
+                    onChange={(e) => setEditingTextValue(e.target.value)}
+                    onBlur={handleSaveEditingText}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === 'Escape') {
+                        handleSaveEditingText();
+                      }
+                    }}
+                    className="w-full bg-transparent font-semibold text-base mb-1 border-b pb-1 border-[#2563eb] focus:outline-none text-current"
+                  />
+                ) : (
+                  <h4 className="font-semibold text-base mb-1 border-b pb-1 border-[#e2e8f0] dark:border-[#272b37]">
+                    {sanitizeText(card.title)}
+                  </h4>
+                )}
                 <p className="text-xs text-[#64748b] dark:text-[#94a3b8] whitespace-pre-wrap">
                   {sanitizeText(card.markdownBody)}
                 </p>
@@ -549,6 +947,7 @@ export function InfiniteCanvas({
           return null;
         })}
 
+        {/* Remote Cursors & Chat */}
         {Array.from(remotePresences.values()).map((presence) => {
           if (!presence.cursor) return null;
           const { wx, wy } = presence.cursor;
@@ -589,6 +988,7 @@ export function InfiniteCanvas({
           );
         })}
 
+        {/* Ephemeral Cursor Chat Input */}
         {isChatOpen && (
           <div
             className="absolute pointer-events-auto z-50 transform -translate-y-full mb-2"

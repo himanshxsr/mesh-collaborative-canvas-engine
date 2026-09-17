@@ -21,7 +21,7 @@ export interface ViewportBounds {
   maxY: number;
 }
 
-export type ElementType = 'rectangle' | 'ellipse' | 'path' | 'sticky' | 'card' | 'connector';
+export type ElementType = 'rectangle' | 'ellipse' | 'path' | 'sticky' | 'card' | 'connector' | 'text' | 'diamond';
 
 export interface BaseElement {
   readonly id: string;           // UUIDv4
@@ -46,6 +46,16 @@ export interface RectangleElement extends BaseElement {
 
 export interface EllipseElement extends BaseElement {
   type: 'ellipse';
+}
+
+export interface DiamondElement extends BaseElement {
+  type: 'diamond';
+}
+
+export interface TextElement extends BaseElement {
+  type: 'text';
+  text: string;
+  fontSize: number; // 14, 18, 24, 32
 }
 
 export interface PathElement extends BaseElement {
@@ -76,7 +86,10 @@ export interface ConnectorElement extends BaseElement {
 export type CanvasElement =
   | RectangleElement
   | EllipseElement
+  | DiamondElement
+  | TextElement
   | PathElement
   | StickyElement
   | CardElement
   | ConnectorElement;
+

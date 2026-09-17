@@ -14,9 +14,12 @@ const SOCKET_SERVER_URL = process.env.NEXT_PUBLIC_SOCKET_URL || 'http://localhos
 export function useSocketSync(roomId: string, userId: string, userName: string) {
   const [isConnected, setIsConnected] = useState(false);
   const [elements, setElements] = useState<Map<string, CanvasElement>>(new Map());
+  const [canUndo, setCanUndo] = useState(false);
+  const [canRedo, setCanRedo] = useState(false);
 
   const docRef = useRef<Y.Doc>(new Y.Doc());
   const socketRef = useRef<Socket<ServerToClientEvents, ClientToServerEvents> | null>(null);
+  const undoManagerRef = useRef<Y.UndoManager | null>(null);
 
   const syncElementsFromDoc = useCallback(() => {
     const yMap = docRef.current.getMap<CanvasElement>('canvas:elements');
@@ -27,6 +30,29 @@ export function useSocketSync(roomId: string, userId: string, userName: string) 
       }
     });
     setElements(newElements);
+  }, []);
+
+  useEffect(() => {
+    const yMap = docRef.current.getMap<CanvasElement>('canvas:elements');
+    const um = new Y.UndoManager(yMap, {
+      trackedOrigins: new Set([null, 'local'])
+    });
+
+    const updateUndoRedoState = () => {
+      setCanUndo(um.undoStack.length > 0);
+      setCanRedo(um.redoStack.length > 0);
+    };
+
+    um.on('stack-item-added', updateUndoRedoState);
+    um.on('stack-item-popped', updateUndoRedoState);
+    undoManagerRef.current = um;
+
+    return () => {
+      um.off('stack-item-added', updateUndoRedoState);
+      um.off('stack-item-popped', updateUndoRedoState);
+      um.destroy();
+      undoManagerRef.current = null;
+    };
   }, []);
 
   useEffect(() => {
@@ -127,7 +153,7 @@ export function useSocketSync(roomId: string, userId: string, userName: string) 
     const yMap = docRef.current.getMap<CanvasElement>('canvas:elements');
     docRef.current.transact(() => {
       yMap.set(element.id, element);
-    });
+    }, 'local');
   }, []);
 
   const deleteElement = useCallback((id: string) => {
@@ -136,8 +162,16 @@ export function useSocketSync(roomId: string, userId: string, userName: string) 
     if (existing) {
       docRef.current.transact(() => {
         yMap.set(id, { ...existing, isDeleted: true });
-      });
+      }, 'local');
     }
+  }, []);
+
+  const undo = useCallback(() => {
+    undoManagerRef.current?.undo();
+  }, []);
+
+  const redo = useCallback(() => {
+    undoManagerRef.current?.redo();
   }, []);
 
   return {
@@ -146,6 +180,10 @@ export function useSocketSync(roomId: string, userId: string, userName: string) 
     elements,
     isConnected,
     addOrUpdateElement,
-    deleteElement
+    deleteElement,
+    canUndo,
+    canRedo,
+    undo,
+    redo
   };
 }
