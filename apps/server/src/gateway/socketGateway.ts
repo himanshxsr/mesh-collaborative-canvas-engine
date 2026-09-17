@@ -16,7 +16,7 @@ import {
   type PresenceUpdatePayload,
   type AwarenessPayload
 } from '@mesh/shared-types';
-import { pubClient, subClient } from '../config/redis.js';
+import { pubClient, subClient, cmdClient } from '../config/redis.js';
 import {
   appendStreamDelta,
   updateRoomActivity,
@@ -37,6 +37,28 @@ function getOrCreateRoomDoc(roomId: string): Y.Doc {
   return doc;
 }
 
+async function syncRoomDocFromStream(roomId: string): Promise<Y.Doc> {
+  const doc = getOrCreateRoomDoc(roomId);
+  try {
+    const streamKey = `canvas:room:${roomId}:stream`;
+    const streamEntries = await cmdClient.xrange(streamKey, '-', '+');
+    if (streamEntries && Array.isArray(streamEntries)) {
+      for (const [, fields] of streamEntries) {
+        if (Array.isArray(fields)) {
+          const deltaIndex = fields.indexOf('delta');
+          const deltaBase64 = deltaIndex !== -1 ? fields[deltaIndex + 1] : fields[1];
+          if (deltaBase64) {
+            Y.applyUpdate(doc, Buffer.from(deltaBase64, 'base64'));
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.error(`[SocketGateway] Error syncing room doc from stream for ${roomId}:`, err);
+  }
+  return doc;
+}
+
 function isRateLimited(socketId: string): boolean {
   const now = Date.now();
   const windowMs = 1000;
@@ -45,7 +67,7 @@ function isRateLimited(socketId: string): boolean {
 
   if (timestamps.length >= MAX_MESSAGES_PER_SEC) {
     socketMessageTimestamps.set(socketId, timestamps);
-    return true; // Exceeded limit
+    return true;
   }
 
   timestamps.push(now);
@@ -78,7 +100,7 @@ export function configureSocketGateway(httpServer: HttpServer) {
     transports: ['websocket'],
     pingInterval: 10000,
     pingTimeout: 5000,
-    maxHttpBufferSize: MAX_PAYLOAD_BYTES // 64KB payload ceiling
+    maxHttpBufferSize: MAX_PAYLOAD_BYTES
   });
 
   io.adapter(createAdapter(pubClient, subClient));
@@ -112,18 +134,27 @@ export function configureSocketGateway(httpServer: HttpServer) {
         const activeConnections = await updateConnectionCount(roomId, 1);
 
         socket.emit('room:joined', { roomId, activeConnections });
+
+        const doc = await syncRoomDocFromStream(roomId);
+        const fullStateUpdate = Y.encodeStateAsUpdate(doc);
+        const base64Update = Buffer.from(fullStateUpdate).toString('base64');
+        socket.emit('crdt:sync-step-2', {
+          roomId,
+          update: base64Update
+        });
+
         console.log(`[SocketGateway] User ${userName} (${userId}) joined room ${roomId}. Active: ${activeConnections}`);
       } catch (err) {
         console.error('[SocketGateway] Error on room:join:', err);
       }
     });
 
-    socket.on('crdt:sync-step-1', (payload: CrdtSyncStep1Payload | ArrayBuffer) => {
+    socket.on('crdt:sync-step-1', async (payload: CrdtSyncStep1Payload | ArrayBuffer) => {
       try {
         if (isRateLimited(socket.id)) return;
 
         let roomId = socket.data.roomId;
-        let stateVector: Uint8Array;
+        let stateVector: Uint8Array | undefined;
 
         if (payload instanceof ArrayBuffer) {
           if (payload.byteLength > MAX_PAYLOAD_BYTES) return;
@@ -131,31 +162,34 @@ export function configureSocketGateway(httpServer: HttpServer) {
         } else if (payload && typeof payload === 'object' && 'stateVector' in payload) {
           roomId = payload.roomId || roomId;
           const sv = payload.stateVector;
-          const byteLen = sv instanceof ArrayBuffer ? sv.byteLength : sv.byteLength;
-          if (byteLen > MAX_PAYLOAD_BYTES) return;
-
-          stateVector = sv instanceof ArrayBuffer ? new Uint8Array(sv) : sv;
-        } else {
-          return;
+          if (sv) {
+            const byteLen = sv instanceof ArrayBuffer ? sv.byteLength : sv.length;
+            if (byteLen > MAX_PAYLOAD_BYTES) return;
+            stateVector = sv instanceof ArrayBuffer ? new Uint8Array(sv) : new Uint8Array(sv);
+          }
         }
 
         if (!isValidRoomId(roomId)) {
           return;
         }
 
-        const doc = getOrCreateRoomDoc(roomId);
-        const diff = Y.encodeStateAsUpdate(doc, stateVector);
+        const doc = await syncRoomDocFromStream(roomId);
+        const diffUpdate = stateVector
+          ? Y.encodeStateAsUpdate(doc, stateVector)
+          : Y.encodeStateAsUpdate(doc);
+
+        const base64Update = Buffer.from(diffUpdate).toString('base64');
 
         socket.emit('crdt:sync-step-2', {
           roomId,
-          update: diff
+          update: base64Update
         });
       } catch (err) {
         console.error('[SocketGateway] Error on crdt:sync-step-1:', err);
       }
     });
 
-    const handleCrdtUpdate = async (payload: CrdtUpdatePayload | ArrayBuffer) => {
+    const handleCrdtUpdate = async (payload: CrdtUpdatePayload | ArrayBuffer | string) => {
       try {
         if (isRateLimited(socket.id)) return;
 
@@ -165,13 +199,20 @@ export function configureSocketGateway(httpServer: HttpServer) {
         if (payload instanceof ArrayBuffer) {
           if (payload.byteLength > MAX_PAYLOAD_BYTES) return;
           updateData = new Uint8Array(payload);
+        } else if (typeof payload === 'string') {
+          const binaryStr = atob(payload);
+          updateData = Uint8Array.from(binaryStr, (c) => c.charCodeAt(0));
         } else if (payload && typeof payload === 'object' && 'update' in payload) {
           roomId = payload.roomId || roomId;
           const up = payload.update;
-          const byteLen = up instanceof ArrayBuffer ? up.byteLength : up.byteLength;
-          if (byteLen > MAX_PAYLOAD_BYTES) return;
-
-          updateData = up instanceof ArrayBuffer ? new Uint8Array(up) : up;
+          if (typeof up === 'string') {
+            const binaryStr = atob(up);
+            updateData = Uint8Array.from(binaryStr, (c) => c.charCodeAt(0));
+          } else {
+            const byteLen = up instanceof ArrayBuffer ? up.byteLength : up.byteLength;
+            if (byteLen > MAX_PAYLOAD_BYTES) return;
+            updateData = up instanceof ArrayBuffer ? new Uint8Array(up) : up;
+          }
         } else {
           return;
         }
@@ -183,7 +224,8 @@ export function configureSocketGateway(httpServer: HttpServer) {
         const doc = getOrCreateRoomDoc(roomId);
         Y.applyUpdate(doc, updateData);
 
-        socket.to(roomId).emit('crdt:sync-update', { roomId, update: updateData });
+        const base64Str = Buffer.from(updateData).toString('base64');
+        socket.to(roomId).emit('crdt:sync-update', { roomId, update: base64Str });
 
         await appendStreamDelta(roomId, updateData);
         await updateRoomActivity(roomId);

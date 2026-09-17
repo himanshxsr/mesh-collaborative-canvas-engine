@@ -11,6 +11,32 @@ import type {
 
 const SOCKET_SERVER_URL = process.env.NEXT_PUBLIC_SOCKET_URL || 'http://localhost:4000';
 
+function parseUpdatePayload(
+  payload: CrdtSyncStep2Payload | CrdtUpdatePayload | ArrayBuffer | string
+): Uint8Array | null {
+  if (typeof payload === 'string') {
+    const binaryStr = atob(payload);
+    return Uint8Array.from(binaryStr, (c) => c.charCodeAt(0));
+  }
+  if (payload instanceof ArrayBuffer) {
+    return new Uint8Array(payload);
+  }
+  if (payload && typeof payload === 'object' && 'update' in payload) {
+    const up = payload.update;
+    if (typeof up === 'string') {
+      const binaryStr = atob(up);
+      return Uint8Array.from(binaryStr, (c) => c.charCodeAt(0));
+    }
+    if (up instanceof ArrayBuffer) {
+      return new Uint8Array(up);
+    }
+    if (up instanceof Uint8Array) {
+      return up;
+    }
+  }
+  return null;
+}
+
 export function useSocketSync(roomId: string, userId: string, userName: string) {
   const [isConnected, setIsConnected] = useState(false);
   const [elements, setElements] = useState<Map<string, CanvasElement>>(new Map());
@@ -60,9 +86,10 @@ export function useSocketSync(roomId: string, userId: string, userName: string) 
     const handleDocUpdate = (update: Uint8Array, origin: unknown) => {
       syncElementsFromDoc();
       if (origin !== 'remote' && socketRef.current && socketRef.current.connected) {
+        const base64Update = Buffer.from(update).toString('base64');
         socketRef.current.emit('crdt:sync-update', {
           roomId,
-          update
+          update: base64Update
         });
       }
     };
@@ -94,49 +121,28 @@ export function useSocketSync(roomId: string, userId: string, userName: string) 
       });
     });
 
-    socket.on('crdt:sync-step-2', (payload: CrdtSyncStep2Payload | ArrayBuffer) => {
-      let updateData: Uint8Array;
-      if (payload instanceof ArrayBuffer) {
-        updateData = new Uint8Array(payload);
-      } else if (payload && typeof payload === 'object' && 'update' in payload) {
-        updateData = payload.update instanceof ArrayBuffer
-          ? new Uint8Array(payload.update)
-          : payload.update;
-      } else {
-        return;
+    socket.on('crdt:sync-step-2', (payload: CrdtSyncStep2Payload | ArrayBuffer | string) => {
+      const updateData = parseUpdatePayload(payload);
+      if (updateData && updateData.length > 0) {
+        Y.applyUpdate(docRef.current, updateData, 'remote');
+        syncElementsFromDoc();
       }
-      Y.applyUpdate(docRef.current, updateData, 'remote');
-      syncElementsFromDoc();
     });
 
-    socket.on('crdt:sync-update', (payload: CrdtUpdatePayload | ArrayBuffer) => {
-      let updateData: Uint8Array;
-      if (payload instanceof ArrayBuffer) {
-        updateData = new Uint8Array(payload);
-      } else if (payload && typeof payload === 'object' && 'update' in payload) {
-        updateData = payload.update instanceof ArrayBuffer
-          ? new Uint8Array(payload.update)
-          : payload.update;
-      } else {
-        return;
+    socket.on('crdt:sync-update', (payload: CrdtUpdatePayload | ArrayBuffer | string) => {
+      const updateData = parseUpdatePayload(payload);
+      if (updateData && updateData.length > 0) {
+        Y.applyUpdate(docRef.current, updateData, 'remote');
+        syncElementsFromDoc();
       }
-      Y.applyUpdate(docRef.current, updateData, 'remote');
-      syncElementsFromDoc();
     });
 
-    socket.on('crdt:update', (payload: CrdtUpdatePayload | ArrayBuffer) => {
-      let updateData: Uint8Array;
-      if (payload instanceof ArrayBuffer) {
-        updateData = new Uint8Array(payload);
-      } else if (payload && typeof payload === 'object' && 'update' in payload) {
-        updateData = payload.update instanceof ArrayBuffer
-          ? new Uint8Array(payload.update)
-          : payload.update;
-      } else {
-        return;
+    socket.on('crdt:update', (payload: CrdtUpdatePayload | ArrayBuffer | string) => {
+      const updateData = parseUpdatePayload(payload);
+      if (updateData && updateData.length > 0) {
+        Y.applyUpdate(docRef.current, updateData, 'remote');
+        syncElementsFromDoc();
       }
-      Y.applyUpdate(docRef.current, updateData, 'remote');
-      syncElementsFromDoc();
     });
 
     socket.on('disconnect', () => {

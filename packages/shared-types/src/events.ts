@@ -13,12 +13,12 @@ export interface CrdtSyncStep1Payload {
 
 export interface CrdtSyncStep2Payload {
   roomId: string;
-  update: Uint8Array | ArrayBuffer;
+  update: Uint8Array | ArrayBuffer | string;
 }
 
 export interface CrdtUpdatePayload {
   roomId: string;
-  update: Uint8Array | ArrayBuffer;
+  update: Uint8Array | ArrayBuffer | string;
 }
 
 export interface PresenceUpdatePayload {
@@ -38,9 +38,9 @@ export interface ClientToServerEvents {
 
 export interface ServerToClientEvents {
   'room:joined': (payload: { roomId: string; activeConnections: number }) => void;
-  'crdt:sync-step-2': (payload: CrdtSyncStep2Payload | ArrayBuffer) => void;
-  'crdt:sync-update': (payload: CrdtUpdatePayload | ArrayBuffer) => void;
-  'crdt:update': (payload: CrdtUpdatePayload | ArrayBuffer) => void;
+  'crdt:sync-step-2': (payload: CrdtSyncStep2Payload | ArrayBuffer | string) => void;
+  'crdt:sync-update': (payload: CrdtUpdatePayload | ArrayBuffer | string) => void;
+  'crdt:update': (payload: CrdtUpdatePayload | ArrayBuffer | string) => void;
   'awareness:update': (payload: PresenceUpdatePayload | AwarenessPayload) => void;
   'presence:update': (payload: PresenceUpdatePayload | AwarenessPayload) => void;
   'room:terminate': (reason: string) => void;
