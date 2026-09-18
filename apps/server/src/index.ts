@@ -1,10 +1,18 @@
 import http from 'http';
 import express, { Request, Response } from 'express';
-import { pubClient, closeRedisConnections } from './config/redis.js';
+import { pubClient, cmdClient, closeRedisConnections } from './config/redis.js';
 import { configureSocketGateway } from './gateway/socketGateway.js';
+import { startSnapshotWorker, SnapshotWorkerController } from './compactor/snapshotWorker.js';
 
 const app = express();
 app.use(express.json());
+
+let workerController: SnapshotWorkerController | null = null;
+
+if (process.env.DATABASE_URL) {
+  console.log('[Server] DATABASE_URL detected. Starting embedded PostgreSQL snapshot compactor worker...');
+  workerController = startSnapshotWorker(process.env.DATABASE_URL, cmdClient);
+}
 
 app.get('/healthz', (_req: Request, res: Response) => {
   res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
@@ -12,10 +20,20 @@ app.get('/healthz', (_req: Request, res: Response) => {
 
 app.get('/readyz', (_req: Request, res: Response) => {
   const isRedisConnected = pubClient.status === 'ready';
-  if (isRedisConnected) {
-    res.status(200).json({ status: 'ready', redis: 'connected' });
+  const isPgReady = !process.env.DATABASE_URL || workerController !== null;
+
+  if (isRedisConnected && isPgReady) {
+    res.status(200).json({
+      status: 'ready',
+      redis: 'connected',
+      pg: workerController ? 'active' : 'bypassed'
+    });
   } else {
-    res.status(503).json({ status: 'unready', redis: pubClient.status });
+    res.status(503).json({
+      status: 'unready',
+      redis: pubClient.status,
+      pg: workerController ? 'active' : 'uninitialized'
+    });
   }
 });
 
@@ -36,6 +54,11 @@ async function gracefulShutdown(signal: string) {
   console.log(`[Server] Received ${signal}. Starting graceful shutdown...`);
 
   try {
+    if (workerController) {
+      console.log('[Server] Stopping snapshot compactor worker loop & closing PostgreSQL pool...');
+      await workerController.stopWorker();
+    }
+
     io.emit('room:terminate', 'Server instance is restarting or shutting down');
     await new Promise<void>((resolve) => {
       io.close(() => {
